@@ -7,6 +7,7 @@ import threading
 import socket
 import time
 from blockchain import *
+import sys
 
 
 # Simple function to get hosts & port pairs.
@@ -59,20 +60,18 @@ class MyTCPHandler(socketserver.BaseRequestHandler):
 				data = data["payload"]
 
 				# Received a transaction.
-				print(f"[NET] Received a transaction from node {self.client_address[0]} {data['message']}")
+				print(f"[NET] Received a transaction from node {self.client_address[0]} : {data['message']}")
 
 				# Validate the transaction.
 				data = validate_transaction(transaction=data,blockchain=self.blockchain)
-
 				# If the data is not a valid transaction we send a false response. 
 				if not isinstance(data,dict):
-
+					
 					send_prefixed(self.request,json.dumps({"response":False}).encode())
 				
 				# If we have reached this point then the message is valid. 
-				else: 
+				else:
 					send_prefixed(self.request,json.dumps({"response":True}).encode())
-
 					# Update the nonce. 
 					self.blockchain.add_transaction(data)
 
@@ -81,37 +80,31 @@ class MyTCPHandler(socketserver.BaseRequestHandler):
 
 						proposal = self.blockchain.create_proposal(len(self.blockchain.blockchain))
 						print(f"[PROPOSAL] Created a block proposal: {proposal}")
-						#self.blockchain.consensus = True
+						#time.sleep(1) Adding a sleep setting here allows for mutliple transactions. 
+						self.blockchain.consensus = True
 
 
 			elif data["type"] == "values":
 
 				index = data["payload"]
 
+				# They are requesting next block. 
 				if index == self.blockchain.blockchain[-1]["index"]+1:
 
 					# If we are not in consensus, create a block proposal and add it to the current proposals.
 					if not self.blockchain.consensus:
 						proposal = self.blockchain.create_proposal(index)
-						print(f"[BLOCK] Received a block request from node: {self.client_address[0]} : {data['payload']}")
+						print(f"[BLOCK] Received a block request from node: {self.client_address[0]} : {index}")
 						
-						#self.blockchain.consensus = True
+						# We are now in consensus. 
+						self.blockchain.consensus = True
 					
+
 					# Send back list of proposals. This is the recieved proposals and the proposal we created (curr_proposal)
-
-
-
-					send_prefixed(self.request,json.dumps(self.blockchain.rec_proposals+self.blockchain.curr_proposal).encode())
-
-
-
-			
-			# print("Received from {}:".format(self.client_address[0]))
-			# print(data)
-			# with self.server.blockchain_lock:
-			# 	added = self.server.blockchain.add_transaction(data)
-			# send_prefixed(self.request, json.dumps({'response': added}).encode())
-
+					send_prefixed(self.request,json.dumps(self.blockchain.proposals).encode())
+				
+				elif index < len((self.blockchain.blockchain)):
+					send_prefixed(self.request,json.dumps([self.blockchain.blockchain[index]]).encode())
 
 
 
@@ -128,47 +121,89 @@ def connect_to_target(server_port_pair,blockchain):
 		try: 
 			s_send = socket.socket(socket.AF_INET,socket.SOCK_STREAM,)
 			s_send.connect((server_port_pair[0],server_port_pair[1]))
-            # The target port will correspond with the socket that attaches to it.
+			s_send.setblocking(True)
+
+
 			connected = True
+			blockchain.connected_outgoing_nodes+=1
+
 		except Exception as e:
-			time.sleep(1)
-	
+			pass
+
 	print(f"Connected: {server_port_pair}")
 
+
+	completed_rounds = 0
+	
+
 	while True:
+
+		# If we are not in consensus then we have no timeout. 
+		if not blockchain.consensus:
+			if s_send:
+				s_send.settimeout(None)		
+			completed_rounds = 0
+
 		# Consensus has begun. 
-		if blockchain.consensus:
-			s_send.timeout(5)
+		if blockchain.consensus and connected and blockchain.rounds_total>completed_rounds:
+			s_send.settimeout(5)
+			print(f"ROUND {completed_rounds}")
 
 			try:
 			# Send block request. 
 				send_prefixed(s_send,json.dumps({"type":"values","payload":len(blockchain.blockchain)}).encode())
 
-			except: 
+			except Exception as e:
+				print(e) 
 				connected = False
 
+			data = []
 			# Timeout
 			try: 
 				data = recv_prefixed(s_send).decode()
+				data = json.loads(data)
+
 			except Exception:
+				print(f"Failed to get data from target node {server_port_pair[1]}")
 				connected = False
 				# timeout occured. 
 
-
+			# Attempt to reconnect. 
 			if not connected:
 				try: 
 					s_send = socket.socket(socket.AF_INET,socket.SOCK_STREAM,)
 					s_send.connect((server_port_pair[0],server_port_pair[1]))
 					# The target port will correspond with the socket that attaches to it.
 					connected = True
-				except Exception as e:
+					print("Successful reconnection")
+					continue # Go again and attempt to get the data.
+				except Exception:
 					print(f"Node failed completely {server_port_pair}")
 
-			
+					# Node has fully DC. We require another round from other nodes. 
+					blockchain.finished_nodes = 0					
+					blockchain.rounds_total+=1
+					blockchain.connected_outgoing_nodes -= 1
 
 
-			# Wait for return.
+
+
+			# Add new proposals to our proposal list.
+			for block in data:
+
+				if block not in blockchain.proposals and block.get("transactions") and len(block["transactions"]):
+					blockchain.proposals.append(block)
+
+			# We have completed a round. 
+			completed_rounds+=1
+
+
+			if blockchain.rounds_total == completed_rounds:
+				blockchain.finished_nodes+=1
+
+		
 			
+
 
 
 # Creates threads and connects to each server/port pair given. 
@@ -180,3 +215,30 @@ def establish_connections(server_port_pairs,blockchain):
         new_connection_thread = threading.Thread(target = connect_to_target, args = (server_port_pairs[i], blockchain))
         new_connection_thread.start()
 	
+
+def pipeline_thread(blockchain):
+		while True:
+
+
+			if len(blockchain.proposals) > 0 and blockchain.finished_nodes == blockchain.connected_outgoing_nodes:
+				# Find the most optimal node to append. 
+				selected_block = None
+				for block in blockchain.proposals:
+
+					if not selected_block:
+						selected_block = block
+					else:
+						if blockchain.calculate_hash(selected_block) > blockchain.calculate_hash(block):
+							selected_block = block
+				
+
+				hash = blockchain.calculate_hash(selected_block)
+				print(f"[CONSENSUS] Appended to the blockchain: {hash}")
+				blockchain.blockchain.append(selected_block)
+
+
+				# Reset everything.
+				blockchain.consensus = False
+				blockchain.proposals = []
+				blockchain.finished_nodes = 0
+				blockchain.rounds_total = 1

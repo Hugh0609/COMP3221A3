@@ -35,10 +35,8 @@ def make_signature(private_key: ed25519.Ed25519PrivateKey, message: str, nonce: 
 	return private_key.sign(transaction_bytes(transaction)).hex()
 
 # Take a json object and 
-def validate_transaction(transaction: dict,blockchain) -> dict | TransactionValidationError:
+def validate_transaction(transaction: dict,blockchain) -> dict :
 	tx = transaction 
-
-
 
 	if not(tx.get('sender') and isinstance(tx['sender'], str) and sender_valid.search(tx['sender'])):
 		print(f"[TX] Received an invalid transaction, wrong sender - {tx['message']}")
@@ -65,7 +63,6 @@ def validate_transaction(transaction: dict,blockchain) -> dict | TransactionVali
 			print(f"[TX] Received an invalid transaction, wrong nonce - {tx['message']}")
 			return TransactionValidationError.INVALID_NONCE
 
-
 	public_key = ed25519.Ed25519PublicKey.from_public_bytes(bytes.fromhex(tx['sender']))
 	if not(tx.get('signature') and isinstance(tx['signature'], str) and signature_valid.search(tx['signature'])):
 		print(f"[TX] Received an invalid transaction, wrong signature mssage - {tx['message']}")
@@ -89,11 +86,14 @@ class Blockchain():
 	def  __init__(self):
 		self.blockchain = []
 		self.pool = []
-		self.consensus = False
 		self.nonces = {}
-		self.curr_proposal = []
-		self.rec_proposals = []	
+		self.connected_outgoing_nodes = 0
 
+
+		self.consensus = False
+		self.proposals = []
+		self.finished_nodes = 0 
+		self.rounds_total = 1
 
 
 		# Genesis Block
@@ -111,6 +111,8 @@ class Blockchain():
 		if not self.pool:
 			return []
 
+
+
 		block = {
 			"index" : index,
 			"transactions" : self.pool,
@@ -119,7 +121,7 @@ class Blockchain():
 		self.pool = []
 
 		block["current_hash"] = self.calculate_hash(block)
-		self.curr_proposal.append(block)
+		self.proposals.append(block)
 		return block
 
 
